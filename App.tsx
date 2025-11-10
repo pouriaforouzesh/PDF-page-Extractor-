@@ -2,8 +2,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { UploadCloud, FileText, Scissors, Download, Loader, AlertCircle, RefreshCw } from './components/Icons';
 
-// pdf-lib is loaded dynamically, so we declare it here to satisfy TypeScript
+// pdf-lib and pdf.js are loaded dynamically, so we declare them here to satisfy TypeScript
 declare const PDFLib: any;
+declare const pdfjsLib: any;
 
 // Helper component for file uploading
 const FileUploader: React.FC<{ onFileSelect: (file: File) => void; isProcessing: boolean }> = ({ onFileSelect, isProcessing }) => {
@@ -67,6 +68,83 @@ const FileUploader: React.FC<{ onFileSelect: (file: File) => void; isProcessing:
     );
 };
 
+const PdfPreview: React.FC<{ pdfBytes: Uint8Array }> = ({ pdfBytes }) => {
+    const canvasContainerRef = useRef<HTMLDivElement>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!pdfBytes || !canvasContainerRef.current) return;
+
+        const renderPdf = async () => {
+            setIsLoading(true);
+            setError(null);
+            if (canvasContainerRef.current) {
+                canvasContainerRef.current.innerHTML = '';
+            }
+
+            try {
+                const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+                const pdf = await loadingTask.promise;
+                const numPages = pdf.numPages;
+
+                for (let i = 1; i <= numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const viewport = page.getViewport({ scale: 0.5 });
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'bg-white rounded-md shadow-lg';
+                    const context = canvas.getContext('2d');
+                    if (!context) continue;
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+
+                    canvasContainerRef.current?.appendChild(canvas);
+
+                    const renderContext = {
+                        canvasContext: context,
+                        viewport: viewport,
+                    };
+                    await page.render(renderContext).promise;
+                }
+            } catch (err) {
+                console.error("Error rendering PDF preview:", err);
+                setError("Could not generate a preview for this PDF.");
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        renderPdf();
+    }, [pdfBytes]);
+
+    if (error) {
+         return (
+            <div className="p-4 bg-yellow-900/50 border border-yellow-500 text-yellow-300 rounded-lg flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 flex-shrink-0"/>
+                <span>{error}</span>
+            </div>
+        )
+    }
+
+    return (
+        <div>
+            {isLoading && (
+                <div className="flex items-center justify-center p-8 text-gray-400">
+                    <Loader className="w-8 h-8" />
+                    <span className="ml-3 text-lg">Generating Preview...</span>
+                </div>
+            )}
+            <div
+                ref={canvasContainerRef}
+                className="flex overflow-x-auto space-x-4 p-4 bg-gray-900/50 rounded-lg border border-gray-600 min-h-[100px]"
+                style={{ display: isLoading ? 'none' : 'flex' }}
+            >
+                {/* Canvases will be appended here */}
+            </div>
+        </div>
+    );
+};
+
 
 export default function App() {
     const [file, setFile] = useState<File | null>(null);
@@ -75,49 +153,61 @@ export default function App() {
     const [isProcessing, setIsProcessing] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [outputPdfUrl, setOutputPdfUrl] = useState<string | null>(null);
-    const [isPdfLibReady, setIsPdfLibReady] = useState<boolean>(false);
+    const [outputPdfBytes, setOutputPdfBytes] = useState<Uint8Array | null>(null);
+    const [librariesReady, setLibrariesReady] = useState<boolean>(false);
 
     useEffect(() => {
-        // If the library is already loaded (e.g., from a previous session or HMR), don't reload it.
-        if (typeof PDFLib !== 'undefined' && PDFLib.PDFDocument) {
-            setIsPdfLibReady(true);
-            return;
-        }
+        let pdfLibLoaded = typeof PDFLib !== 'undefined';
+        let pdfJsLoaded = typeof pdfjsLib !== 'undefined';
 
-        const script = document.createElement('script');
-        script.src = "https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js";
-        script.async = true;
-
-        const handleLoad = () => {
-            if (typeof PDFLib !== 'undefined' && PDFLib.PDFDocument) {
-                setIsPdfLibReady(true);
-            } else {
-                setError("PDF library loaded, but failed to initialize. Please refresh the page.");
+        const checkAndSetReady = () => {
+            if (pdfLibLoaded && pdfJsLoaded) {
+                setLibrariesReady(true);
             }
         };
 
-        const handleError = () => {
-            setError("The PDF processing library failed to load. Please check your internet connection and refresh the page.");
-        };
+        if (pdfLibLoaded && pdfJsLoaded) {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
+            checkAndSetReady();
+            return;
+        }
 
-        script.addEventListener('load', handleLoad);
-        script.addEventListener('error', handleError);
+        const scripts: HTMLScriptElement[] = [];
 
-        document.body.appendChild(script);
+        if (!pdfLibLoaded) {
+            const pdfLibScript = document.createElement('script');
+            pdfLibScript.src = "https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js";
+            pdfLibScript.async = true;
+            pdfLibScript.onload = () => { pdfLibLoaded = true; checkAndSetReady(); };
+            pdfLibScript.onerror = () => setError("Failed to load PDF creation library. Please refresh.");
+            document.body.appendChild(pdfLibScript);
+            scripts.push(pdfLibScript);
+        }
 
-        // Cleanup: remove event listeners when component unmounts
+        if (!pdfJsLoaded) {
+            const pdfJsScript = document.createElement('script');
+            pdfJsScript.src = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js";
+            pdfJsScript.async = true;
+            pdfJsScript.onload = () => {
+                pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
+                pdfJsLoaded = true; 
+                checkAndSetReady(); 
+            };
+            pdfJsScript.onerror = () => setError("Failed to load PDF preview library. Please refresh.");
+            document.body.appendChild(pdfJsScript);
+            scripts.push(pdfJsScript);
+        }
+
         return () => {
-            script.removeEventListener('load', handleLoad);
-            script.removeEventListener('error', handleError);
+            scripts.forEach(s => document.body.removeChild(s));
         };
-    }, []); // Run this effect only once on component mount
+    }, []);
 
     const handleFileSelect = useCallback(async (selectedFile: File) => {
         if (isProcessing) return;
 
-        // Safeguard check, though UI logic should prevent this state
-        if (!isPdfLibReady) {
-            setError('The PDF processing library is not ready. Please wait a moment and try again.');
+        if (!librariesReady) {
+            setError('PDF libraries are not ready. Please wait a moment and try again.');
             return;
         }
 
@@ -145,7 +235,7 @@ export default function App() {
         } finally {
             setIsProcessing(false);
         }
-    }, [isProcessing, isPdfLibReady]);
+    }, [isProcessing, librariesReady]);
 
     const parsePageString = (input: string, max: number): number[] => {
         const pages = new Set<number>();
@@ -183,6 +273,7 @@ export default function App() {
         setIsProcessing(true);
         setError(null);
         setOutputPdfUrl(null);
+        setOutputPdfBytes(null);
         
         try {
             const pageIndices = parsePageString(pageInput, totalPages);
@@ -196,6 +287,8 @@ export default function App() {
             copiedPages.forEach(page => newPdfDoc.addPage(page));
 
             const pdfBytes = await newPdfDoc.save();
+            setOutputPdfBytes(pdfBytes);
+
             const blob = new Blob([pdfBytes], { type: 'application/pdf' });
             const url = URL.createObjectURL(blob);
             setOutputPdfUrl(url);
@@ -203,6 +296,7 @@ export default function App() {
         } catch (e: any) {
             setError(e.message || 'An unexpected error occurred during PDF processing.');
             setOutputPdfUrl(null);
+            setOutputPdfBytes(null);
         } finally {
             setIsProcessing(false);
         }
@@ -218,21 +312,17 @@ export default function App() {
             URL.revokeObjectURL(outputPdfUrl);
         }
         setOutputPdfUrl(null);
+        setOutputPdfBytes(null);
     };
 
     const renderContent = () => {
         // State 1: Library is loading.
-        if (!isPdfLibReady) {
-            // If an error occurred during loading, the main error display will show it.
-            // We render nothing here in that case.
-            if (error) {
-                return null;
-            }
-            // Otherwise, show the loading indicator.
+        if (!librariesReady) {
+            if (error) return null;
             return (
                  <div className="flex flex-col items-center justify-center space-y-4 text-gray-400 p-8 min-h-[260px]">
                     <Loader className="w-12 h-12 text-gray-500" />
-                    <p className="text-lg font-semibold text-gray-300">Initializing PDF Engine...</p>
+                    <p className="text-lg font-semibold text-gray-300">Initializing PDF Engines...</p>
                     <p className="text-sm text-gray-500">This should only take a moment.</p>
                 </div>
             );
@@ -311,9 +401,12 @@ export default function App() {
                     )}
                     
                     {outputPdfUrl && (
-                         <div className="mt-6 p-6 bg-green-900/50 border border-green-500 rounded-lg text-center space-y-4">
-                            <h3 className="text-xl font-semibold text-green-300">Your new PDF is ready!</h3>
-                             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+                         <div className="mt-6 p-6 bg-green-900/50 border border-green-500 rounded-lg space-y-4">
+                            <h3 className="text-xl font-semibold text-green-300 text-center">Extraction Complete!</h3>
+                            
+                            {outputPdfBytes && librariesReady && <PdfPreview pdfBytes={outputPdfBytes} />}
+                            
+                             <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4 border-t border-green-500/30">
                                  <a
                                      href={outputPdfUrl}
                                      download={`extracted-${file?.name || 'pages.pdf'}`}
@@ -335,7 +428,7 @@ export default function App() {
                 </main>
 
                 <footer className="text-center mt-8 text-sm text-gray-500">
-                    <p>Powered by React, Tailwind CSS, and pdf-lib.js</p>
+                    <p>Powered by React, Tailwind CSS, pdf-lib.js, and pdf.js</p>
                 </footer>
             </div>
         </div>
